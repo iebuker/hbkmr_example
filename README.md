@@ -8,15 +8,16 @@ In this work, we introduce a Bayesian framework for modeling heteroscedastic hea
 
 ## Getting Started
 
-To explore the method and reproduce the example from the paper, open:
+To explore the method using a simulated dataset, open:
 
 `overview.html`
 
 This document provides a step-by-step demonstration of:
 
-- Data simulation
-- Model fitting
-- Posterior inference
+- Simulation of heteroscedastic data
+- Model fitting using NIMBLE
+- Visualization of Bayesian residuals to inform the variance model 
+- Posterior inference using helper functions 
 - Visualization of results
 
 ## Key Files
