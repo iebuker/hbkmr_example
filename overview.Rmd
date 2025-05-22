@@ -1,0 +1,169 @@
+---
+title: 'Bayesian kernel machine regression for heteroscedastic health outcome data: Example analysis'
+output: html_document
+---
+
+```{r, message=FALSE}
+# Seed for reproducibility
+set.seed(1218)
+
+# Load packages
+library(nimble) # For model fitting 
+# library(MCMCvis) # For model diagnostics and visualizations 
+library(coda) # For model diagnostics 
+
+# Source helper functions 
+source("makeK.R") # Function to generate kernel matrix 
+source("SimHData.R") # Function to generate heteroscedastic data 
+source("checkResidualVar.R") # Function to examine residual patterns 
+``` 
+
+# Example Data Generation using `SimHData`
+
+For demonstration purposes, we generate a dataset with 200 observations and a five-component mixture exhibiting a realistic correlation structure (CITE BKMR PACKAGE). The functional form of the $h$ function specified by `hfun = 3` is
+
+$$
+f(z, \text{ind}) = 4 \cdot \frac{1}{1 + \exp\left( -\frac{1}{0.3} \times \frac{1}{4} \left( z_{\text{ind}[1]} + z_{\text{ind}[2]} + \frac{1}{2} z_{\text{ind}[1]} z_{\text{ind}[2]} \right) \right)}
+$$
+
+This is a nonlinear, non-additive function of $z_1$ and $z_2$ that also includes an interaction term between the two mixture components. One covariate is generated from a Gaussian distribution with a corresponding regression coefficient set to 2. The residual variance is simulated as a function of the third metal exposure, with the strength and direction of this relationship controlled by the `var_mult` parameter.
+
+```{r}
+sim_data <- SimHData(
+  n = 200, M = 5, beta.true = 2, hfun = 3, 
+  Zgen = "realistic", ind = 1:2, 
+  family = "gaussian", var_metal = 3, var_mult = 0.2
+)
+```
+
+The resulting relationship between the residual variance (`sigsq.true`) and the mixture components can be visualized using a scatterplot matrix.
+
+```{r}
+plot_data <- cbind(sigsq.true = sim_data$sigsq.true, sim_data$Z)
+
+pairs(plot_data)
+```
+
+
+
+
+
+
+
+
+# Fitting a BKMR Model to Assess the Heteroscedasticity Assumption
+
+In the context of our NIMBLE implementation of the HBKMR model, fitting a BKMR model corresponds to specifying an intercept-only variance model. That is, the design matrix $\boldsymbol{W}$ for the variance model is an $N \times 1$ vector of ones. To that end, we fit a BKMR model to the previously simulated dataset under the model specification described in Section 3.1 of the manuscript.
+
+```{r, cache=TRUE, message=FALSE}
+y <- sim_data$y
+X <- sim_data$X
+Z <- sim_data$Z
+W <- as.matrix(rep(1, length(y)))
+
+bkmr_code <- nimbleCode({
+  sqrt_tau ~ dunif(0, 100)
+  tau <- pow(sqrt_tau, 2)
+
+  if (P <= 1) {
+    beta ~ dnorm(mean = 0, var = 1e3)
+  } else {
+    for (p in 1:P) {
+      beta[p] ~ dnorm(mean = 0, var = 1e3)
+    }
+  }
+
+  for (m in 1:M) {
+    inv_r[m] ~ dunif(min = 0, max = 100)
+    r[m] <- 1 / inv_r[m]
+  }
+
+  if (Q <= 1) {
+    gamma ~ dnorm(mean = 0, var = 1e3)
+  } else {
+    for (q in 1:Q) {
+      gamma[q] ~ dnorm(mean = 0, var = 1e3)
+    }
+  }
+
+  for (i in 1:N) {
+    if (Q <= 1) {
+      sigma2[i] <- exp(gamma * W[i, 1])
+    } else {
+      sigma2[i] <- exp(inprod(gamma[1:Q], W[i, 1:Q]))
+    }
+  }
+
+  K[1:N, 1:N] <- makeK(Z = Z[1:N, 1:M], r = r[1:M], N = N, M = M)
+  covar[1:N, 1:N] <- (K[1:N, 1:N] * tau) + diag(sigma2[1:N])
+  chol_covar[1:N, 1:N] <- chol(covar[1:N, 1:N])
+
+  for (i in 1:N) {
+    if (P <= 1) {
+      linpred[i] <- beta * X[i, 1]
+    } else {
+      linpred[i] <- inprod(beta[1:P], X[i, 1:P])
+    }
+  }
+  y[1:N] ~ dmnorm(linpred[1:N], cholesky = chol_covar[1:N, 1:N], prec_param = 0)
+})
+
+N <- length(y)
+M <- ncol(Z)
+P <- ncol(X)
+Q <- ncol(as.matrix(W))
+
+# We specify initial values as the MLE estimates or other reasonable starting values.
+
+lmfit0 <- lm(y ~ X + Z)
+coefX <- coef(lmfit0)[grep("X", names(coef(lmfit0)))]
+beta <- as.vector(unname(ifelse(is.na(coefX), 0, coefX)))
+sqrt_tau <- sqrt(0.5)
+inv_r <- 1 / rep(0.1, ncol(Z))
+gamma <- c(log(summary(lmfit0)$sigma^2))
+
+bkmr_model <- nimbleModel(
+  code = bkmr_code,
+  data = list(y = y, X = X, Z = Z, W = W),
+  constants = list(N = N, M = M, P = P, Q = Q), 
+  inits = list(beta = beta, sqrt_tau = sqrt_tau, inv_r = inv_r, gamma = gamma)
+)
+
+# Configure MCMC
+bkmr_mcmc_conf <- configureMCMC(bkmr_model, monitors = c('beta', 'tau', 'gamma', 'r', 'sigma2'))
+bkmr_mcmc <- buildMCMC(bkmr_mcmc_conf)
+
+# Compile model and MCMC
+compiled_bkmr_model <- compileNimble(bkmr_model)
+compiled_bkmr_mcmc <- compileNimble(bkmr_mcmc)
+
+samples_bkmr <- runMCMC(compiled_bkmr_mcmc, niter = 1e5, nburnin = 2e4, nchains = 1, setSeed = 1218)
+```
+
+## Diagnostics 
+
+```{r}
+# The sampler monitors all n sigma2 values, which are identical in the BKMR model 
+# We keep only the first to avoid redundant diagnostics 
+pars <- c("beta", "gamma", paste0("r[", 1:5, "]"), "tau", "sigma2[1]")
+samples_bkmr_subset <- samples_bkmr[, pars]
+coda_samples <- mcmc(samples_bkmr_subset, start = 8e4, end = 1e5, thin = 1)
+
+par(mfrow = c(3, 3))
+traceplot(coda_samples)
+par(mfrow = c(1, 1))
+
+effectiveSize(coda_samples)
+```
+
+The effective sample sizes (ESS) are generally high, with $\tau$ having the smallest ESS at 2119.507. The trace plots also appear satisfactory and do not indicate any pathological MCMC behaviors. We can proceed to assess the homoscedasticity assumption. 
+
+## Assessing Homoscedasticity Using the `checkResidualVar` Function
+
+```{r}
+colnames(X) <- "x1"
+
+# Fix the need to specify categorical X. 
+checkResidualVar(fit = samples_bkmr, y = y, X = X, Z = Z, method = "exact", Z_component = 1:ncol(Z), X_component = 1:ncol(X), return_residuals = F, residuals = "bkmr", sel = NULL, categorical_X = NULL)
+```
+
