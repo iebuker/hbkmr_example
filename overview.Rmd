@@ -4,18 +4,31 @@ output: html_document
 ---
 
 ```{r, message=FALSE}
-# Seed for reproducibility
-set.seed(1218)
-
 # Load packages
-library(nimble) # For model fitting 
-# library(MCMCvis) # For model diagnostics and visualizations 
-library(coda) # For model diagnostics 
+library(nimble) # For model fitting
+library(coda) # For model diagnostics
+library(ggplot2) # For residual plots 
+library(gridExtra) # For plot grids 
+library(ggplot2)
+library(ggtext)
 
-# Source helper functions 
-source("makeK.R") # Function to generate kernel matrix 
-source("SimHData.R") # Function to generate heteroscedastic data 
-source("checkResidualVar.R") # Function to examine residual patterns 
+# Source helper functions
+source("makeK.R") # Function to generate kernel matrix
+source("SimHData.R") # Function to generate heteroscedastic data
+source("checkResidualVar.R") # Function to examine residual patterns
+source("helper_createPlots.R") # Helper functions for plotting
+source("createPlots.R") # Function to visualize h and predictions
+
+
+# Reading in saved objects to make compilation faster 
+samples_bkmr <- readRDS("saved_objects/samples_bkmr.rds")
+samples_hbkmr <- readRDS("saved_objects/samples_hbkmr.rds")
+
+overall_hbkmr <- readRDS("saved_objects/hbkmr_overall.rds")
+overall_bkmr <- readRDS("saved_objects/bkmr_overall.rds")
+
+pred_hbkmr <- readRDS("saved_objects/hbkmr_prediction.rds")
+pred_bkmr <- readRDS("saved_objects/bkmr_prediction.rds")
 ``` 
 
 # Example Data Generation using `SimHData`
@@ -29,14 +42,22 @@ $$
 This is a nonlinear, non-additive function of $z_1$ and $z_2$ that also includes an interaction term between the two mixture components. One covariate is generated from a Gaussian distribution with a corresponding regression coefficient set to 2. The residual variance is simulated as a function of the third metal exposure, with the strength and direction of this relationship controlled by the `var_mult` parameter.
 
 ```{r}
+# Seed for reproducibility
+set.seed(1218)
+
 sim_data <- SimHData(
-  n = 200, M = 5, beta.true = 2, hfun = 3, 
-  Zgen = "realistic", ind = 1:2, 
-  family = "gaussian", var_metal = 3, var_mult = 0.2
+  n = 200, M = 5, beta.true = 2, hfun = 3,
+  Zgen = "realistic", ind = 1:2,
+  family = "gaussian", var_metal = 3, var_mult = 1.2
 )
+
+y <- sim_data$y
+X <- sim_data$X
+Z <- sim_data$Z
+W <- as.matrix(rep(1, length(y)))
 ```
 
-The resulting relationship between the residual variance (`sigsq.true`) and the mixture components can be visualized using a scatterplot matrix.
+The resulting relationship between the residual variance (`sigsq.true`) and the mixture components can be visualized using a scatterplot matrix. Although we specified variance to be a function of the third mixture component, a relationship between the residual variance and the remaining mixture components is induced through the realistic correlation structure we specified among the mixture components. 
 
 ```{r}
 plot_data <- cbind(sigsq.true = sim_data$sigsq.true, sim_data$Z)
@@ -44,23 +65,11 @@ plot_data <- cbind(sigsq.true = sim_data$sigsq.true, sim_data$Z)
 pairs(plot_data)
 ```
 
-
-
-
-
-
-
-
-# Fitting a BKMR Model to Assess the Heteroscedasticity Assumption
+# Fitting a BKMR Model 
 
 In the context of our NIMBLE implementation of the HBKMR model, fitting a BKMR model corresponds to specifying an intercept-only variance model. That is, the design matrix $\boldsymbol{W}$ for the variance model is an $N \times 1$ vector of ones. To that end, we fit a BKMR model to the previously simulated dataset under the model specification described in Section 3.1 of the manuscript.
 
-```{r, cache=TRUE, message=FALSE}
-y <- sim_data$y
-X <- sim_data$X
-Z <- sim_data$Z
-W <- as.matrix(rep(1, length(y)))
-
+```{r, eval=FALSE}
 bkmr_code <- nimbleCode({
   sqrt_tau ~ dunif(0, 100)
   tau <- pow(sqrt_tau, 2)
@@ -125,45 +134,308 @@ gamma <- c(log(summary(lmfit0)$sigma^2))
 bkmr_model <- nimbleModel(
   code = bkmr_code,
   data = list(y = y, X = X, Z = Z, W = W),
-  constants = list(N = N, M = M, P = P, Q = Q), 
+  constants = list(N = N, M = M, P = P, Q = Q),
   inits = list(beta = beta, sqrt_tau = sqrt_tau, inv_r = inv_r, gamma = gamma)
 )
 
 # Configure MCMC
-bkmr_mcmc_conf <- configureMCMC(bkmr_model, monitors = c('beta', 'tau', 'gamma', 'r', 'sigma2'))
+bkmr_mcmc_conf <- configureMCMC(bkmr_model, monitors = c("beta", "tau", "gamma", "r", "sigma2"), enableWAIC = TRUE)
 bkmr_mcmc <- buildMCMC(bkmr_mcmc_conf)
 
 # Compile model and MCMC
 compiled_bkmr_model <- compileNimble(bkmr_model)
 compiled_bkmr_mcmc <- compileNimble(bkmr_mcmc)
 
-samples_bkmr <- runMCMC(compiled_bkmr_mcmc, niter = 1e5, nburnin = 2e4, nchains = 1, setSeed = 1218)
+samples_bkmr <- runMCMC(compiled_bkmr_mcmc, niter = 1e5, nburnin = 2e4, nchains = 1, WAIC = TRUE, setSeed = 1218)
+
+saveRDS(samples_bkmr, "saved_objects/samples_bkmr.rds")
 ```
 
 ## Diagnostics 
 
-```{r}
-# The sampler monitors all n sigma2 values, which are identical in the BKMR model 
-# We keep only the first to avoid redundant diagnostics 
+```{r, cache=TRUE}
 pars <- c("beta", "gamma", paste0("r[", 1:5, "]"), "tau", "sigma2[1]")
-samples_bkmr_subset <- samples_bkmr[, pars]
-coda_samples <- mcmc(samples_bkmr_subset, start = 8e4, end = 1e5, thin = 1)
+available_pars <- pars[pars %in% colnames(samples_bkmr$samples)]
+samples_subset <- samples_bkmr$samples[, available_pars, drop = FALSE]
+
+coda_obj <- mcmc(samples_subset, start = 20001, end = 1e5)
 
 par(mfrow = c(3, 3))
-traceplot(coda_samples)
+traceplot(coda_obj)
 par(mfrow = c(1, 1))
 
-effectiveSize(coda_samples)
+effectiveSize(coda_obj)
 ```
 
-The effective sample sizes (ESS) are generally high, with $\tau$ having the smallest ESS at 2119.507. The trace plots also appear satisfactory and do not indicate any pathological MCMC behaviors. We can proceed to assess the homoscedasticity assumption. 
+The effective sample sizes (ESS) are generally high, with $\tau$ having the smallest ESS. The trace plots also appear satisfactory and do not indicate any pathological MCMC behaviors. We can proceed to assess the homoscedasticity assumption. 
 
 ## Assessing Homoscedasticity Using the `checkResidualVar` Function
 
-```{r}
+```{r, fig.show='hide', cache=TRUE}
 colnames(X) <- "x1"
 
-# Fix the need to specify categorical X. 
-checkResidualVar(fit = samples_bkmr, y = y, X = X, Z = Z, method = "exact", Z_component = 1:ncol(Z), X_component = 1:ncol(X), return_residuals = F, residuals = "bkmr", sel = NULL, categorical_X = NULL)
+residual_plots <- checkResidualVar(
+  fit = samples_bkmr, y = y, X = X, Z = Z,
+  method = "exact", Z_component = 1:ncol(Z),
+  X_component = 1:ncol(X), return_residuals = T,
+  residuals = "bkmr", sel = NULL, categorical_X = NULL
+)
 ```
+
+```{r, echo=FALSE}
+grid.arrange(residual_plots$fitted_plot, 
+             grid.arrange(residual_plots$mixture_plots[[1]], 
+                          residual_plots$mixture_plots[[3]], ncol = 2))
+```
+
+# Fitting an HBKMR Model 
+
+Examination of the residual plots reveals a clear fanning pattern with respect to the first and third mixture components. The pattern observed for the third component is expected, as the data-generating process specified a heteroscedastic error structure dependent on this exposure in the `SimHData` function. The fanning observed with respect to the first component is attributable to its correlation with the third exposure. In response, we fit an HBKMR model that includes $z_3$ in the $\boldsymbol{W}$ matrix, which now has dimension $N \times 2$.
+
+```{r}
+y <- sim_data$y
+X <- sim_data$X
+Z <- sim_data$Z
+W <- as.matrix(cbind(rep(1, length(y)), Z[,3]))
+```
+
+```{r, eval=FALSE}
+hbkmr_code <- nimbleCode({
+  sqrt_tau ~ dunif(0, 100)
+  tau <- pow(sqrt_tau, 2)
+  
+  if (P <= 1) {
+    beta ~ dnorm(mean = 0, var = 1e3)
+  } else {
+    for (p in 1:P) {
+      beta[p] ~ dnorm(mean = 0, var = 1e3)
+    }
+  }
+  
+  for (m in 1:M) {
+    inv_r[m] ~ dunif(min = 0, max = 100)
+    r[m] <- 1 / inv_r[m]
+  }
+  
+  if (Q <= 1) {
+    gamma ~ dnorm(mean = 0, var = 1e3)
+  } else {
+    for (q in 1:Q) {
+      gamma[q] ~ dnorm(mean = 0, var = 1e3)
+    }
+  }
+  
+  for (i in 1:N) {
+    if (Q <= 1) {
+      sigma2[i] <- exp(gamma * W[i, 1])
+    } else {
+      sigma2[i] <- exp(inprod(gamma[1:Q], W[i, 1:Q]))
+    }
+  }
+  
+  K[1:N, 1:N] <- makeK(Z = Z[1:N, 1:M], r = r[1:M], N = N, M = M)
+  covar[1:N, 1:N] <- (K[1:N, 1:N] * tau) + diag(sigma2[1:N])
+  chol_covar[1:N, 1:N] <- chol(covar[1:N, 1:N])
+  
+  for (i in 1:N) {
+    if (P <= 1) {
+      linpred[i] <- beta * X[i, 1]
+    } else {
+      linpred[i] <- inprod(beta[1:P], X[i, 1:P])
+    }
+  }
+  y[1:N] ~ dmnorm(linpred[1:N], cholesky = chol_covar[1:N, 1:N], prec_param = 0)
+})
+
+N <- length(y)
+M <- ncol(Z)
+P <- ncol(X)
+Q <- ncol(as.matrix(W))
+
+# We specify initial values as the MLE estimates or other reasonable starting values.
+
+lmfit0 <- lm(y ~ X + Z)
+coefX <- coef(lmfit0)[grep("X", names(coef(lmfit0)))]
+beta <- as.vector(unname(ifelse(is.na(coefX), 0, coefX)))
+sqrt_tau <- sqrt(0.5)
+inv_r <- 1 / rep(0.1, ncol(Z))
+gamma <- c(log(summary(lmfit0)$sigma^2))
+
+hbkmr_model <- nimbleModel(
+  code = hbkmr_code,
+  data = list(y = y, X = X, Z = Z, W = W),
+  constants = list(N = N, M = M, P = P, Q = Q),
+  inits = list(beta = beta, sqrt_tau = sqrt_tau, inv_r = inv_r, gamma = gamma)
+)
+
+# Configure MCMC
+hbkmr_mcmc_conf <- configureMCMC(hbkmr_model, monitors = c("beta", "tau", "gamma", "r", "sigma2"), enableWAIC = TRUE)
+hbkmr_mcmc <- buildMCMC(hbkmr_mcmc_conf)
+
+# Compile model and MCMC
+compiled_hbkmr_model <- compileNimble(hbkmr_model)
+compiled_hbkmr_mcmc <- compileNimble(hbkmr_mcmc)
+
+samples_hbkmr <- runMCMC(compiled_hbkmr_mcmc, niter = 1e5, nburnin = 2e4, nchains = 1, WAIC = TRUE, setSeed = 1218)
+
+saveRDS(samples_hbkmr, "saved_objects/samples_hbkmr.rds")
+```
+
+```{r, cache=TRUE}
+pars <- c("beta", "gamma", paste0("r[", 1:5, "]"), "tau", "sigma2[1]")
+available_pars <- pars[pars %in% colnames(samples_hbkmr$samples)]
+samples_subset <- samples_hbkmr$samples[, available_pars, drop = FALSE]
+
+coda_obj <- mcmc(samples_subset, start = 20001, end = 1e5)
+
+par(mfrow = c(3, 3))
+traceplot(coda_obj)
+par(mfrow = c(1, 1))
+
+effectiveSize(coda_obj)
+```
+
+# Comparison of HBKMR and BKMR 
+
+```{r}
+names <- c("BKMR", "HBKMR")
+waic <- c(samples_bkmr$WAIC$WAIC, samples_hbkmr$WAIC$WAIC)
+print(rbind(names, waic = round(waic)))
+```
+
+In this applied example, the HBKMR model yields an approximately 30-point reduction in WAIC compared to the BKMR model, indicating a notably better fit. To better understand the practical implications of modeling heteroscedasticity, we now compare the two approaches graphically. Although various low-dimensional visualizations of the $h$ function are available, we shall focus on the joint mixture effect plots and predictive intervals to illustrate differences in inference and uncertainty quantification between the models.
+
+## Graphical Summaries 
+
+```{r, eval = FALSE}
+create_plot_data <- function(samps, y, X, Z, W, name){
+  
+  beta_indices <- grep("beta", colnames(samps))
+  gamma_indices <- grep("gamma", colnames(samps))
+  r_indices <- grep("r", colnames(samps))
+  tau_indices <- grep("tau", colnames(samps))
+  
+  beta <- as.matrix(samps[, beta_indices])
+  gamma <- as.matrix(samps[, gamma_indices])
+  r <- as.matrix(samps[, r_indices])
+  tau <- as.matrix(samps[, tau_indices])
+  
+  overall <- makeOverallRiskPlot(
+    beta = beta, gamma = gamma, r = r, tau = tau, y = y,
+    X = X, Z = Z, W = W, q.fixed = 0.5, q.levels = seq(0.1, 0.9, by = 0.1),
+    sel = NULL, method = "exact", nugget = 0
+  )
+  
+  prediction <- makePredictionInvervalPlot(beta = beta, gamma = gamma, 
+                                           r = r, tau = tau, y = y, X = X,
+                                           Z = Z, W = W, sel = NULL)
+  
+  saveRDS(overall, paste0(name, "_overall.rds"))
+  saveRDS(prediction, paste0(name, "_prediction.rds"))
+}
+
+create_plot_data(samps = samples_bkmr$samples, y = y, X = X, Z = Z, 
+                         W = as.matrix(rep(1, length(y))), name = "bkmr")
+
+create_plot_data(samps = samples_hbkmr$samples, y = y, X = X, Z = Z, 
+                         W = as.matrix(cbind(rep(1, length(y)), Z[,3])), 
+                         name = "hbkmr")
+```
+
+### Overall Mixture Effects 
+
+```{r}
+overall_both <- as.data.frame(rbind(overall_hbkmr, overall_bkmr))
+overall_both$method <- c(rep('HBKMR', 9), rep('BKMR', 9))
+
+overall_both$lower <- overall_both$est - 1.96*overall_both$sd
+overall_both$upper <- overall_both$est + 1.96*overall_both$sd
+
+h_fun <- function(Z) {
+  term <- Z[1] + Z[2] + 0.5 * Z[1] * Z[2]
+  result <- 4 / (1 + exp(-(1 / 0.3) * (1 / 4) * term))
+  return(result)
+}
+
+ref <- apply(Z, 2, function(x) quantile(x, 0.5))
+new <- apply(Z, 2, function(x) quantile(x, seq(0.1, 0.9, by = 0.1)))
+overall_both$truth <- apply(new, 1, h_fun) - h_fun(ref)
+
+ggplot(overall_both, aes(x = q.level)) +
+  geom_pointrange(aes(y = est,
+                      ymin = est - 1.96 * sd,
+                      ymax = est + 1.96 * sd,
+                      linetype = method),
+                  position = position_dodge(width = 0.05)) +
+  geom_point(aes(y = truth, shape = "Truth", color = "Truth"), size = 2.5) +
+  geom_hline(yintercept = 0, color = 'gray40') +
+  scale_color_manual(name = "", values = c("Truth" = "black")) +
+  scale_shape_manual(name = "", values = c("Truth" = 17)) +
+  labs(x = "q", 
+       y = "h(**z** | quantiles = q) - h(**z** | quantiles = 0.50)", 
+       linetype = "Method") + 
+  theme_minimal() +
+  theme(axis.title.y = element_markdown(), 
+        axis.title.x = element_markdown(), 
+        legend.title = element_markdown(), 
+        plot.title = element_markdown(),
+        legend.position = "top")
+```
+
+### Prediction Intervals 
+
+To assess how well each method adapts to heteroskedasticity, we overlay the true 95% prediction interval width on the figure. In the data-generating process, the conditional variance of the outcome depends on the third mixture component, $z_3$, through the relationship:
+
+$$
+\sigma^2(z_3) = \exp(1 + 1.2z_3),
+$$
+
+which implies the conditional standard deviation is:
+
+$$
+\sigma(z_3) = \sqrt{\exp(1 + 1.2z_3)}.
+$$
+
+Under a correctly specified normal model, the ideal 95% prediction interval has width:
+
+$$
+\text{True Width}(z_3) = 2 \times z_{0.975} \times \sigma(z) \approx 3.92 \times \sqrt{\exp(1 + 1.2z_3)}, 
+$$
+where $z_{(0.975)}$ denotes the 97.5<sup>th</sup> percentile of the standard normal distribution. 
+
+This expression defines the benchmark interval width that fully reflects the heteroskedastic structure in the data. In the plot, we display this theoretical width as a **dashed black curve**, allowing direct visual comparison with the empirical interval widths produced by each method.
+
+Methods that closely track this curve demonstrate an appropriate adaptation to the changing variance and are likely to provide more accurate and calibrated predictive uncertainty.
+
+```{r}
+prediction_both <- as.data.frame(rbind(pred_bkmr, pred_hbkmr))
+
+prediction_both$lower <- prediction_both$prediction - 1.96*prediction_both$sd
+prediction_both$upper <- prediction_both$prediction + 1.96*prediction_both$sd
+
+prediction_both$method <- c(rep('BKMR', 200), rep('HBKMR', 200))
+prediction_both$exposure <- Z[,3]
+
+prediction_both$sigma2 <- exp(1 + 1.2 * prediction_both$exposure)
+prediction_both$true_width <- 3.92 * sqrt(prediction_both$sigma2)
+prediction_both$width <- prediction_both$upper - prediction_both$lower
+
+ggplot(prediction_both, aes(x = exposure, y = width, color = method)) +
+  geom_point(alpha = 0.3, size = 0.7) +
+  geom_smooth(method = "loess", span = 0.5, se = FALSE, linewidth = 1) +
+  geom_line(aes(y = true_width), color = "black", linetype = "dashed", linewidth = 0.7) +
+  labs(
+    x = "z<sub>3</sub>", 
+    y = "Prediction Interval Width", 
+    color = "Method") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_markdown(), 
+    axis.title.y = element_markdown(), 
+    plot.title = element_markdown(), 
+    legend.title = element_markdown(), 
+    legend.position = "top"
+  )
+```
+
 

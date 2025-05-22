@@ -16,7 +16,7 @@
 #' @param return_residuals Logical. If TRUE, a vector of residual values will be returned, otherwise FALSE (default is TRUE).
 #' @param residuals A character string indicating which method to use for calculating residuals: 'bkmr' for BKMR residuals, 'kmr' for KMR residuals, and 'linreg' for linear regression residuals (default is "bkmr").
 #' @param int Logical. If TRUE, a linear regression model with interactions is fit. If FALSE, a main effects model is fit (default is TRUE).
-#' @param sel Indices to thin the posterior samples for faster exact computation (default is to keep every 10th sample).
+#' @param sel A numeric vector of indices to thin the posterior samples for faster exact computation (default, `NULL`, is to keep every 10th sample).
 #' @param categorical_X A list of names and indices of categorical variables that have been included as dummies in the X matrix (default is NULL).
 #' @param ... Additional arguments passed to the KMR function.
 #'
@@ -97,7 +97,7 @@ checkResidualVar <- function(fit = NULL, y, X, Z, method = "exact",
     sigsq_eps <- mean(ests[, grepl("sigma2", colnames(ests))][,1])
     
     r <- colMeans(ests[, grepl("r", colnames(ests))])
-    beta <- colMeans(ests[, grepl("beta", colnames(ests))])
+    beta <- colMeans(as.matrix(ests[, grepl("beta", colnames(ests))]))
     tau <- mean(ests[, grepl("tau", colnames(ests))])
     gamma <- mean(ests[, grepl("gamma", colnames(ests))])
     lambda <- mean(ests[, grepl("tau", colnames(ests))] / 
@@ -134,7 +134,7 @@ checkResidualVar <- function(fit = NULL, y, X, Z, method = "exact",
       warning("Posterior samples for `sigma2` are missing. Ensure NIMBLE monitors `sigma2`")
     }
     
-    n_samps <- nrow(fit$samples)
+    n_samps <- nrow(ests)
     
     if(is.null(sel)){
       sel_index <- (1:n_samps)[seq(1, n_samps, by = 10)]
@@ -150,7 +150,7 @@ checkResidualVar <- function(fit = NULL, y, X, Z, method = "exact",
     
     sigsq_eps <- ests[, grepl("sigma2", colnames(ests))][,1]
     r <- ests[, grepl("r", colnames(ests))]
-    beta <- ests[, grepl("beta", colnames(ests))]
+    beta <- as.matrix(ests[, grepl("beta", colnames(ests))])
     tau <- ests[, grepl("tau", colnames(ests))]
     gamma <- ests[, grepl("gamma", colnames(ests))]
     lambda <- ests[, grepl("tau", colnames(ests))] / sigsq_eps
@@ -193,8 +193,15 @@ checkResidualVar <- function(fit = NULL, y, X, Z, method = "exact",
     }
     
     
-    ests <- fit$samples
-    beta_mean <- colMeans(ests[, grepl("beta", colnames(ests))])
+    if(length(fit) == 2 & "WAIC" %in% names(fit)){
+      # If WAIC was being monitored 
+      ests <- fit$samples
+    } else {
+      # If WAIC was not being monitored 
+      ests <- fit
+    }
+    
+    beta_mean <- colMeans(as.matrix(ests[, grepl("beta", colnames(ests))]))
     Xbeta_mean <- X %*% beta_mean 
     
     res <- y - (h_mean + Xbeta_mean)
@@ -513,22 +520,26 @@ checkResidualVar <- function(fit = NULL, y, X, Z, method = "exact",
   num_rows <- nrow(X)  
   num_cols <- length(categorical_X)  
   cat_df <- data.frame(matrix(NA_character_, nrow = num_rows, ncol = num_cols))
-  for(i in 1:length(categorical_X)){
-    # Extract indices of categorical columns
-    indices <- categorical_X[[i]]  
-    categorical_covariates <- X[, indices, drop = FALSE]  
-    
-    # Re-construct the reference level column from the dummy-encoded variables
-    ref_dummy <- apply(categorical_covariates, 1, function(x) all(x == 0))  
-    joint_cat <- cbind(ref = ifelse(ref_dummy, 1, 0), categorical_covariates)
-    
-    # Convert each row to the corresponding category name
-    cat_vec <- apply(joint_cat, 1, function(x) colnames(joint_cat)[which(x == 1)]) |> as.factor()
-    
-    # Assign to the output dataframe
-    cat_df[, i] <- cat_vec
-    colnames(cat_df)[i] <- names(categorical_X)[i]
+  
+  if(num_cols > 0){
+    for(i in 1:length(categorical_X)){
+      # Extract indices of categorical columns
+      indices <- categorical_X[[i]]  
+      categorical_covariates <- X[, indices, drop = FALSE]  
+      
+      # Re-construct the reference level column from the dummy-encoded variables
+      ref_dummy <- apply(categorical_covariates, 1, function(x) all(x == 0))  
+      joint_cat <- cbind(ref = ifelse(ref_dummy, 1, 0), categorical_covariates)
+      
+      # Convert each row to the corresponding category name
+      cat_vec <- apply(joint_cat, 1, function(x) colnames(joint_cat)[which(x == 1)]) |> as.factor()
+      
+      # Assign to the output dataframe
+      cat_df[, i] <- cat_vec
+      colnames(cat_df)[i] <- names(categorical_X)[i]
+    }
   }
+  
   
   # Indices of the X matrix supplied as being categorical 
   cat_indices <- unname(unlist(categorical_X))
