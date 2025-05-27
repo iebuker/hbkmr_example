@@ -4,7 +4,7 @@ This repository accompanies the paper:
 
 **_Bayesian Kernel Machine Regression for Heteroscedastic Health Outcome Data_**
 
-In this work, we introduce a Bayesian framework for modeling heteroscedastic health outcome data using kernel machine regression. The method is implemented in [NIMBLE](https://r-nimble.org) and includes tools for model fitting, diagnostics, and visualizing both residual variation and the estimated \( h(\cdot) \) function.
+In this work, we introduce a Bayesian framework for modeling heteroscedastic health outcome data using kernel machine regression. The method is implemented in [NIMBLE](https://r-nimble.org) and includes tools for model fitting, diagnostics, and visualizing both residual variation and the estimated $h(\cdot)$ function.
 
 ## Getting Started
 
