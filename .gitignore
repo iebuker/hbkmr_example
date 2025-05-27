@@ -1,2 +1,5 @@
 overview_cache 
 overview_files
+.DS_Store
+.Rhistory
+.gitattributes
