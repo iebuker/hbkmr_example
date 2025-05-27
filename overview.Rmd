@@ -1,6 +1,7 @@
 ---
 title: 'Bayesian kernel machine regression for heteroscedastic health outcome data: Example analysis'
 output: html_document
+bibliography: references.bib
 ---
 
 ```{r, message=FALSE}
@@ -33,7 +34,7 @@ pred_bkmr <- readRDS("saved_objects/bkmr_prediction.rds")
 
 # Example Data Generation using `SimHData`
 
-For demonstration purposes, we generate a dataset with 200 observations and a five-component mixture exhibiting a realistic correlation structure (CITE BKMR PACKAGE). The functional form of the $h$ function specified by `hfun = 3` is
+For demonstration purposes, we generate a dataset with 200 observations and a five-component mixture exhibiting a realistic correlation structure [@package_2018]. The functional form of the $h$ function specified by `hfun = 3` is
 
 $$
 f(z, \text{ind}) = 4 \cdot \frac{1}{1 + \exp\left( -\frac{1}{0.3} \times \frac{1}{4} \left( z_{\text{ind}[1]} + z_{\text{ind}[2]} + \frac{1}{2} z_{\text{ind}[1]} z_{\text{ind}[2]} \right) \right)}
